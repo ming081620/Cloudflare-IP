@@ -7,12 +7,29 @@ const CARRIER_LABELS: Record<Carrier, string> = {
   other: '其他'
 };
 
+export const PUBLIC_HTML_CACHE_CONTROL = 'public, max-age=0, s-maxage=600, stale-while-revalidate=3600';
+export const PUBLIC_LATEST_CACHE_CONTROL = 'public, max-age=0, s-maxage=30, stale-while-revalidate=60';
+export const PUBLIC_HTML_CACHE_TAG = 'public-html';
+export const PUBLIC_LATEST_CACHE_TAG = 'public-latest';
+export const PUBLIC_WORKER_CACHE_TAGS = [PUBLIC_HTML_CACHE_TAG, PUBLIC_LATEST_CACHE_TAG] as const;
+
 export function jsonResponse<T>(payload: ApiSuccess<T> | ApiError, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store'
+    }
+  });
+}
+
+export function cacheableJsonResponse<T>(payload: ApiSuccess<T> | ApiError, cacheControl: string, cacheTag: string, status = 200): Response {
+  return new Response(JSON.stringify(payload, null, 2), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': cacheControl,
+      'cache-tag': cacheTag
     }
   });
 }
@@ -24,6 +41,20 @@ export function htmlResponse(html: string): Response {
       'cache-control': 'no-store'
     }
   });
+}
+
+export function cacheableHtmlResponse(html: string): Response {
+  return new Response(html, {
+    headers: publicHtmlHeaders()
+  });
+}
+
+export function publicHtmlHeaders(): HeadersInit {
+  return {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': PUBLIC_HTML_CACHE_CONTROL,
+    'cache-tag': PUBLIC_HTML_CACHE_TAG
+  };
 }
 
 export function textResponse(text: string, status = 404): Response {

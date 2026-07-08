@@ -11,6 +11,9 @@
 		"enabled": true,
 		"head_sampling_rate": 0.1
 	},
+	"cache": {
+		"enabled": true
+	},
 	"vars": {
 		"DOMAIN_CT": "ct.6610000.xyz",
 		"DOMAIN_CM": "cm.6610000.xyz",

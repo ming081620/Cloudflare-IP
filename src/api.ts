@@ -24,7 +24,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return handlePublicApi(request, env, ctx);
   }
   if (url.pathname.startsWith('/api/admin/')) {
-    return handleAdminApi(request, env);
+    return handleAdminApi(request, env, ctx);
   }
 
   if (request.method === 'GET' && url.pathname === '/api/health') {

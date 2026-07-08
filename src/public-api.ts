@@ -2,7 +2,19 @@ import { calibrateIpv6Geo, readAggregates, readPublicCache, rebuildAggregates, r
 import { updateDnsForAggregates } from './dns';
 import { detectCarrier, detectProvince, detectServerGeo } from './geo';
 import type { Carrier, DirectCheckResult, Env, IpVersion, NodeRecord, PublicUploadPayload, ServerGeo, UploadNodeInput } from './types';
-import { buildDataset, isIpv4Address, isIpv6Address, jsonResponse, normalizeCarrier, normalizeIpVersion, sortNodes } from './utils';
+import {
+  buildDataset,
+  cacheableJsonResponse,
+  isIpv4Address,
+  isIpv6Address,
+  jsonResponse,
+  normalizeCarrier,
+  normalizeIpVersion,
+  PUBLIC_LATEST_CACHE_CONTROL,
+  PUBLIC_LATEST_CACHE_TAG,
+  sortNodes
+} from './utils';
+import { purgePublicWorkerCache } from './worker-cache';
 
 const MAX_PUBLIC_UPLOAD_NODES = 50;
 const DEFAULT_ROOT_DOMAIN = '6610000.xyz';
@@ -23,10 +35,11 @@ export async function handlePublicApi(request: Request, env: Env, ctx: Execution
   return jsonResponse({ success: false, error: '公开 API 路径不存在' }, 404);
 }
 
-export async function rebuildPublicData(env: Env): Promise<void> {
+export async function rebuildPublicData(env: Env, ctx?: ExecutionContext): Promise<void> {
   const aggregates = await rebuildAggregates(env.DB, env.DNS_ROOT_DOMAIN ?? DEFAULT_ROOT_DOMAIN);
   await writePublicCache(env.SPEED_TEST_KV, aggregates);
   await updateDnsForAggregates(env, aggregates);
+  await purgePublicWorkerCache(ctx);
 }
 
 async function handleRegister(request: Request, env: Env): Promise<Response> {
@@ -104,7 +117,7 @@ async function handlePublicUpload(request: Request, env: Env, ctx: ExecutionCont
     nodes: parsed.nodes
   });
 
-  ctx.waitUntil(rebuildPublicData(env));
+  ctx.waitUntil(rebuildPublicData(env, ctx));
 
   return jsonResponse({
     success: true,
@@ -123,15 +136,15 @@ async function handlePublicUpload(request: Request, env: Env, ctx: ExecutionCont
 async function handlePublicLatest(env: Env): Promise<Response> {
   const cached = await readPublicCache(env.SPEED_TEST_KV);
   if (cached) {
-    return jsonResponse(cached as { success: true } & Record<string, unknown>);
+    return cacheableJsonResponse(cached as { success: true } & Record<string, unknown>, PUBLIC_LATEST_CACHE_CONTROL, PUBLIC_LATEST_CACHE_TAG);
   }
   const aggregates = await readAggregates(env.DB);
-  return jsonResponse({
+  return cacheableJsonResponse({
     success: true,
     updated_at: new Date().toISOString(),
     total: aggregates.length,
     aggregates
-  });
+  }, PUBLIC_LATEST_CACHE_CONTROL, PUBLIC_LATEST_CACHE_TAG);
 }
 
 function parsePublicNodes(payload: PublicUploadPayload, ipVersion: IpVersion): { ok: true; nodes: NodeRecord[] } | { ok: false; error: string } {
