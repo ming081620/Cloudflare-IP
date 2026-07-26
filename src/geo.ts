@@ -1,4 +1,5 @@
 import type { Carrier, ServerGeo } from './types';
+import { stringOrUndefined } from './parse';
 
 const PROVINCES: Record<string, { code: string; name: string; aliases: string[] }> = {
   bj: { code: 'bj', name: '北京', aliases: ['beijing', '北京'] },
@@ -51,34 +52,82 @@ export function detectServerGeo(request: Request): ServerGeo {
     asOrganization,
     province_code: province.code,
     province_name: province.name,
-    carrier: detectCarrier(asOrganization)
+    carrier: detectCarrier(asOrganization),
+    clientTcpRtt: typeof cf?.clientTcpRtt === 'number' ? cf.clientTcpRtt : undefined,
+    colo: stringOrUndefined(cf?.colo)
   };
 }
 
-export function detectProvince(...values: Array<string | undefined>): { code: string; name: string } {
-  const text = values.filter(Boolean).join(' ').toLowerCase();
+/**
+ * Latin aliases are matched as whole tokens, CJK ones as substrings.
+ *
+ * The previous substring-only form meant `'xianning'.includes('xian')`, so Xianning (Hubei)
+ * and Xiantao (Hubei) both resolved to Shaanxi. Apostrophes stay inside a token so "Xi'an"
+ * still matches. No CJK province name is a substring of another (河南/湖南, 山西/陕西,
+ * 河北/湖北 are all distinct), so substring matching remains correct for those.
+ */
+function matchProvince(text: string): { code: string; name: string } | null {
+  if (!text) {
+    return null;
+  }
+  const lowered = text.toLowerCase();
+  const tokens = new Set(lowered.split(/[^a-z0-9']+/).filter(Boolean));
+
   for (const province of Object.values(PROVINCES)) {
-    if (province.aliases.some((alias) => text.includes(alias.toLowerCase()))) {
-      return { code: province.code, name: province.name };
+    for (const alias of province.aliases) {
+      const needle = alias.toLowerCase();
+      const hit = /^[a-z0-9' ]+$/.test(needle)
+        ? needle.includes(' ')
+          ? lowered.includes(needle)
+          : tokens.has(needle)
+        : lowered.includes(needle);
+      if (hit) {
+        return { code: province.code, name: province.name };
+      }
     }
   }
-  return { code: 'unknown', name: '未知' };
+  return null;
 }
+
+/**
+ * Values are tried in the order given, most authoritative first, rather than being joined into
+ * one string — otherwise a city alias could outrank a correct region.
+ */
+export function detectProvince(...values: Array<string | undefined>): { code: string; name: string } {
+  const present = values.filter((value): value is string => Boolean(value && value.trim()));
+
+  for (const value of present) {
+    const hit = matchProvince(value);
+    if (hit) {
+      return hit;
+    }
+  }
+  // Last resort: the combined text, which catches aliases split across region and city.
+  const combined = matchProvince(present.join(' '));
+  return combined ?? { code: 'unknown', name: '未知' };
+}
+
+/**
+ * Matched against the AS organization name with word boundaries. The previous substring
+ * form tested for a bare 'ct', so any org merely containing those two letters
+ * ("Connectivity", "Octopus", "ACTCORP", "Direct Connect") was classified as China Telecom
+ * and thereby passed the DNS trust gate. Same class of bug for 'cnc' and Unicom.
+ */
+const CARRIER_ORG_PATTERNS: ReadonlyArray<readonly [RegExp, Carrier]> = [
+  [/china\s*telecom|chinanet|\bct[-_ ]?cn\b|no\.?\s*31\s*,?\s*jin-?rong/i, 'ct'],
+  [/china\s*mobile|\bcmcc\b|\bcmnet\b|\bcmi\b/i, 'cm'],
+  [/china\s*unicom|\bunicom\b|cncgroup|china\s*169|\bcuii\b/i, 'cu']
+];
 
 export function detectCarrier(asOrganization?: string): Carrier {
-  const text = (asOrganization ?? '').toLowerCase();
-  if (text.includes('telecom') || text.includes('chinanet') || text.includes('ct')) {
-    return 'ct';
+  const text = (asOrganization ?? '').trim();
+  if (!text) {
+    return 'other';
   }
-  if (text.includes('mobile') || text.includes('cmcc')) {
-    return 'cm';
-  }
-  if (text.includes('unicom') || text.includes('cnc')) {
-    return 'cu';
+  for (const [pattern, carrier] of CARRIER_ORG_PATTERNS) {
+    if (pattern.test(text)) {
+      return carrier;
+    }
   }
   return 'other';
-}
-
-function stringOrUndefined(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }

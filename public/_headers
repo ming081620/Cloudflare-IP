@@ -1,0 +1,20 @@
+# The page is versioned per deploy by the asset server, so a long shared cache is safe and the
+# deploy itself is the invalidation — no purge needed.
+/
+  Cache-Control: public, max-age=0, s-maxage=600, stale-while-revalidate=3600
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  # Every script and style is now a same-origin file and there are no inline handlers left, so
+  # this needs no 'unsafe-inline' for scripts. style-src keeps it for the few inline style
+  # attributes the cards still carry.
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/style.css
+  Cache-Control: public, max-age=0, s-maxage=86400, stale-while-revalidate=604800
+
+/app.js
+  Cache-Control: public, max-age=0, s-maxage=86400, stale-while-revalidate=604800

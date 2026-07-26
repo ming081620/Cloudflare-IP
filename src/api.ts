@@ -1,5 +1,7 @@
-import { checkKv, readHistoryIndex, readLatest, readRawLatest, writeLatest } from './storage';
+import { readHistoryIndex, readLatest, readRawLatest, writeLatest } from './storage';
 import { handleAdminApi } from './admin-api';
+import { handleHealth } from './health';
+import { logEvent } from './observability';
 import { handlePublicApi } from './public-api';
 import type { Carrier, DomainMapping, Env, HistorySummary, NodeRecord, UploadNodeInput, UploadPayload } from './types';
 import {
@@ -14,6 +16,7 @@ import {
   parseLimit,
   sortNodes
 } from './utils';
+import { booleanOrDefault, numberOrDefault, stringOrUndefined } from './parse';
 
 const MAX_UPLOAD_NODES = 100;
 
@@ -30,35 +33,61 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   if (request.method === 'GET' && url.pathname === '/api/health') {
     return handleHealth(env);
   }
-  if (request.method === 'GET' && url.pathname === '/api/nodes') {
-    return handleNodes(url, env);
-  }
-  if (request.method === 'GET' && url.pathname === '/api/raw') {
-    return handleRaw(env);
-  }
-  if (request.method === 'GET' && url.pathname === '/api/history') {
-    return handleHistory(url, env);
-  }
-  if (request.method === 'GET' && url.pathname === '/api/mappings') {
-    return handleMappings(env);
-  }
-  if (request.method === 'POST' && url.pathname === '/api/upload') {
-    return handleUpload(request, env);
-  }
 
+  if (LEGACY_PATHS.has(url.pathname)) {
+    const legacy = await handleLegacy(request, env, url);
+    if (legacy) {
+      return legacy;
+    }
+  }
   return jsonResponse({ success: false, error: 'API 路径不存在' }, 404);
 }
 
-async function handleHealth(env: Env): Promise<Response> {
-  const kv_ok = await checkKv(env.SPEED_TEST_KV);
-  return jsonResponse({
-    success: true,
-    data: {
-      status: 'ok',
-      time: new Date().toISOString(),
-      kv_ok
-    }
-  });
+/**
+ * The KV-backed endpoints that predate the crowdtest path. Nothing in the product uses them:
+ * the panel only fetches /api/public/latest and the OpenWrt client only posts to
+ * /api/public/{register,upload}. Their only known callers are scripts/upload-{linux.sh,
+ * windows.ps1}, which the README never mentions.
+ *
+ * Instrumented rather than deleted outright so two weeks of logs can show empirically whether
+ * anyone else calls them. Set LEGACY_API_ENABLED=0 to switch them off with a config change
+ * instead of a deploy.
+ */
+const LEGACY_PATHS = new Set(['/api/nodes', '/api/raw', '/api/history', '/api/mappings', '/api/upload']);
+const LEGACY_SUNSET = 'Wed, 12 Aug 2026 00:00:00 GMT';
+
+function deprecate(response: Response, path: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set('deprecation', 'true');
+  headers.set('sunset', LEGACY_SUNSET);
+  headers.set('link', '</api/public/latest>; rel="successor-version"');
+  logEvent('warn', 'legacy_endpoint_used', { path });
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function handleLegacy(request: Request, env: Env, url: URL): Promise<Response | null> {
+  if ((env.LEGACY_API_ENABLED ?? '1') !== '1') {
+    logEvent('warn', 'legacy_endpoint_disabled', { path: url.pathname });
+    return jsonResponse({ success: false, error: '该接口已下线，请改用 /api/public/latest' }, 410);
+  }
+
+  const path = url.pathname;
+  if (request.method === 'GET' && path === '/api/nodes') {
+    return deprecate(await handleNodes(url, env), path);
+  }
+  if (request.method === 'GET' && path === '/api/raw') {
+    return deprecate(await handleRaw(env), path);
+  }
+  if (request.method === 'GET' && path === '/api/history') {
+    return deprecate(await handleHistory(url, env), path);
+  }
+  if (request.method === 'GET' && path === '/api/mappings') {
+    return deprecate(await handleMappings(env), path);
+  }
+  if (request.method === 'POST' && path === '/api/upload') {
+    return deprecate(await handleUpload(request, env), path);
+  }
+  return null;
 }
 
 async function handleNodes(url: URL, env: Env): Promise<Response> {
@@ -259,28 +288,4 @@ function parseUploadNode(
       updated_at: ''
     }
   };
-}
-
-function stringOrUndefined(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function numberOrDefault(value: unknown, fallback: number): number {
-  if (typeof value === 'number') {
-    return value;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    return Number(value);
-  }
-  return fallback;
-}
-
-function booleanOrDefault(value: unknown, fallback: boolean): boolean {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  if (typeof value === 'string') {
-    return value.toLowerCase() === 'true' || value === '1';
-  }
-  return fallback;
 }

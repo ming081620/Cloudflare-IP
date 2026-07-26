@@ -1,6 +1,6 @@
 {
   "name": "cf-ip-speed-panel",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,11 +10,23 @@
     "d1:migrate:remote": "wrangler d1 migrations apply cf-ip-speed-panel --remote",
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types scripts/regression.ts"
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "lint": "oxlint src test scripts public/app.js",
+    "build:icons": "node scripts/build-icons.mjs",
+    "sync-version": "node scripts/sync-version.mjs",
+    "sync-version:check": "node scripts/sync-version.mjs --check",
+    "//version": "npm runs this after bumping package.json and before creating the tag, so `npm version minor` produces one consistent, tagged release.",
+    "version": "node scripts/sync-version.mjs && git add -A"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@cloudflare/workers-types": "^4.20260604.0",
+    "oxlint": "^1.75.0",
+    "remixicon": "^3.5.0",
     "typescript": "^5.8.3",
+    "vitest": "^4.1.10",
     "wrangler": "^4.97.0"
   }
 }

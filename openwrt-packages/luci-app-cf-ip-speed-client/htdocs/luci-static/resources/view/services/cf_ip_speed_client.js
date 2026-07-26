@@ -165,14 +165,21 @@ function formatBeijingTime(value) {
   }).format(new Date(timestamp)).replace(/\//g, '/');
 }
 
+/*
+ * This used to map every 'ok' status to the literal "\u4e0a\u4f20\u6210\u529f" ("upload succeeded"), so the
+ * page claimed an upload after clearing the log, after updating the cron schedule, and in
+ * local-only mode where nothing is uploaded at all. The real outcome is in last_message, which
+ * the shell client always writes and the UI never read.
+ */
 function statusLabel(status) {
   if (/ok|success|\u6210\u529f|\u5b8c\u6210/i.test(status))
-    return '\u4e0a\u4f20\u6210\u529f';
+    return '\u6b63\u5e38';
   return status || '\u5f85\u8fd0\u884c';
 }
 
 function renderOverview(map, sectionId) {
   var status = uciGet(map, sectionId, 'last_status') || '\u5f85\u8fd0\u884c';
+  var lastMessage = uciGet(map, sectionId, 'last_message') || '';
   var updatedAt = uciGet(map, sectionId, 'last_upload_at') || '\u5c1a\u672a\u540c\u6b65';
   var deviceId = uciGet(map, sectionId, 'device_id') || '\u672a\u6ce8\u518c';
   var enabled = uciGet(map, sectionId, 'enabled') === '1';
@@ -195,6 +202,9 @@ function renderOverview(map, sectionId) {
     + '<div><span>IPv4 \u6700\u4f73</span><strong title="' + escapeAttr(v4 ? v4.ip : '-') + '">' + escapeHtml(v4 ? v4.ip : '-') + '</strong></div>'
     + '<div><span>IPv6 \u6700\u4f73</span><strong title="' + escapeAttr(v6 ? v6.ip : '-') + '">' + escapeHtml(v6 ? v6.ip : '-') + '</strong></div>'
     + '</div>'
+    + (lastMessage
+      ? '<p class="cfip-sync" title="' + escapeAttr(lastMessage) + '">\u8be6\u60c5\uff1a' + escapeHtml(lastMessage) + '</p>'
+      : '')
     + '<p class="cfip-sync">\u6700\u8fd1\u4efb\u52a1\uff1a' + escapeHtml(formatBeijingTime(updatedAt)) + ' \uff08\u5317\u4eac\u65f6\u95f4\uff09</p>'
     + '</section>'
     + '<section class="cfip-links cfip-card">'

@@ -1,3 +1,4 @@
+import { describeError, logEvent } from './observability';
 import type { HistorySummary, NodesDataset } from './types';
 
 const LATEST_KEY = 'nodes:latest';
@@ -5,6 +6,11 @@ const HISTORY_INDEX_KEY = 'history:index';
 const META_LAST_UPLOAD_KEY = 'meta:last_upload';
 const HISTORY_PREFIX = 'nodes:history:';
 const HISTORY_LIMIT = 20;
+/**
+ * The index below keeps only HISTORY_LIMIT entries, so rotated-out snapshot keys become
+ * unreachable. Without a TTL they would accumulate in KV forever.
+ */
+const HISTORY_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export async function readLatest(kv: KVNamespace): Promise<NodesDataset | null> {
   return kv.get<NodesDataset>(LATEST_KEY, 'json');
@@ -20,7 +26,7 @@ export async function writeLatest(kv: KVNamespace, dataset: NodesDataset, summar
   const nextHistory = [summary, ...history.filter((item) => item.key !== historyKey)].slice(0, HISTORY_LIMIT);
 
   await kv.put(LATEST_KEY, JSON.stringify(dataset));
-  await kv.put(historyKey, JSON.stringify(dataset));
+  await kv.put(historyKey, JSON.stringify(dataset), { expirationTtl: HISTORY_TTL_SECONDS });
   await kv.put(META_LAST_UPLOAD_KEY, JSON.stringify(summary));
   await kv.put(HISTORY_INDEX_KEY, JSON.stringify(nextHistory));
 }
@@ -34,7 +40,8 @@ export async function checkKv(kv: KVNamespace): Promise<boolean> {
   try {
     await kv.get(META_LAST_UPLOAD_KEY, 'text');
     return true;
-  } catch {
+  } catch (error) {
+    logEvent('error', 'kv_healthcheck_failed', { error: describeError(error) });
     return false;
   }
 }

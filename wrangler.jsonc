@@ -9,10 +9,21 @@
 	],
 	"observability": {
 		"enabled": true,
-		"head_sampling_rate": 0.1
+		"head_sampling_rate": 1
 	},
 	"cache": {
 		"enabled": true
+	},
+	// The panel is a static page served straight from Cloudflare's asset CDN — no worker
+	// invocation, and versioned per deploy so the deploy is the cache invalidation. Only the
+	// API and the byte sink still run the worker.
+	"assets": {
+		"directory": "./public",
+		"not_found_handling": "none",
+		"run_worker_first": [
+			"/api/*",
+			"/__speedtest"
+		]
 	},
 	"vars": {
 		"DOMAIN_CT": "ct.6610000.xyz",
@@ -50,6 +61,35 @@
 		{
 			"binding": "SPEED_TEST_KV",
 			"id": "8c97f740db2b4706a0739f22a71c94ad"
+		}
+	],
+	// A legitimate router uploads once or twice per run, and runs are at least an hour apart,
+	// so these ceilings are far above real usage. `period` only supports 10 or 60 seconds;
+	// sustained device-farming is capped separately by a per-prefix daily quota in D1.
+	"ratelimits": [
+		{
+			"name": "UPLOAD_LIMITER",
+			"namespace_id": "1001",
+			"simple": {
+				"limit": 6,
+				"period": 60
+			}
+		},
+		{
+			"name": "REGISTER_LIMITER",
+			"namespace_id": "1002",
+			"simple": {
+				"limit": 2,
+				"period": 60
+			}
+		},
+		{
+			"name": "SPEEDTEST_LIMITER",
+			"namespace_id": "1003",
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
 		}
 	]
 }

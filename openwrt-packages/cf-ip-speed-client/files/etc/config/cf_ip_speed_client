@@ -1,4 +1,6 @@
 config client 'main'
+	# Point this at your own deployment when self-hosting; the client no longer needs patching.
+	option worker_url 'https://cf.6610000.xyz'
 	option enabled '0'
 	option upload_enabled '1'
 	option ip_mode 'v4'

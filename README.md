@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://cf.6610000.xyz">项目页面</a> ·
-  <a href="https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.5">插件下载</a> ·
+  <a href="https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.6">插件下载</a> ·
   <a href="https://github.com/10000ge10000/cf-ip-speed-panel">GitHub</a>
 </p>
 
@@ -53,7 +53,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/10000ge10000/cf-ip-speed-p
 
 也可以到 Release 手动下载对应版本的两个包：
 
-[https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.5](https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.5)
+[https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.6](https://github.com/10000ge10000/cf-ip-speed-panel/releases/tag/v0.1.6)
 
 必须安装这两个包：
 
@@ -74,7 +74,8 @@ luci-app-cf-ip-speed-client
 
 - `.ipk`：适用于 OpenWrt 23 / 24 以及仍使用 `opkg` 的系统。
 - `.apk`：适用于已经使用 `apk` 包管理器的新版本 OpenWrt / snapshot。
-- 已发布 x86_64、ARM64、ARMv7、MIPS 常见平台包。
+- 两个包都是 `PKGARCH:=all`（与架构无关），Release 文件名里的架构只是构建标签。
+  安装脚本只在选择 `cfst` 二进制时才真正区分架构。
 
 ## 安全说明
 
@@ -82,3 +83,40 @@ luci-app-cf-ip-speed-client
 - OpenWrt 本机会保存 `device_id/device_token`，用于识别设备。
 - 服务端只保存设备 token 的哈希，不保存明文 token。
 - 疑似代理、云服务器出口、境外出口数据不会参与自动 DNS 优选。
+- 归属地以 Cloudflare 观测到的数据为准，客户端上报只能降低信任，不能推翻服务端判定。
+- 上传的 IP 必须落在 Cloudflare 公布的地址段内，写入 DNS 前会再校验一次。
+- 一条 DNS 记录需要来自至少两个**独立网络**的佐证才会生效；未达标的结果在面板显示为「候选」。
+
+详见 [SECURITY.md](SECURITY.md)。
+
+## 自己部署一套
+
+面板、聚合与 DNS 优选都跑在 Cloudflare Workers 上，可以部署你自己的实例：
+**[docs/deploy.md](docs/deploy.md)**。
+
+需要一个你自己控制并托管在 Cloudflare 的域名。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/deploy.md](docs/deploy.md) | 自部署完整步骤与运维 |
+| [docs/api.md](docs/api.md) | 全部接口与数据结构 |
+| [docs/architecture.md](docs/architecture.md) | 数据流、信任模型、互证规则 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发环境、测试、发布流程 |
+| [SECURITY.md](SECURITY.md) | 威胁模型与漏洞报告 |
+| [CHANGELOG.md](CHANGELOG.md) | 变更记录 |
+
+## 开发
+
+```bash
+npm ci && npm run d1:migrate:local && npm run dev
+```
+
+```bash
+npm run check && npm run lint && npm test
+```
+
+## License
+
+[MIT](LICENSE)

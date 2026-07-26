@@ -1,1 +1,18 @@
+# Copy to .dev.vars for local development (.dev.vars is gitignored).
+# In production these are Worker secrets: npx wrangler secret put <NAME>
+
+# Bearer token for the legacy KV upload path (/api/upload).
 UPLOAD_TOKEN=replace-with-local-dev-token
+
+# Bearer token for every /api/admin/* route. Without it the admin API returns 401 for
+# everything, which is silent and easy to miss — /api/health reports whether it is set.
+ADMIN_TOKEN=replace-with-local-admin-token
+
+# Cloudflare API token used to write the DNS records. Scope it to exactly
+# Zone -> DNS -> Edit on the target zone and nothing else.
+# Leave both DNS_* values unset locally to keep DNS sync disabled.
+DNS_API_TOKEN=replace-with-scoped-dns-token
+
+# Zone ID of the domain the records are written into. Not actually a secret, but it is
+# declared alongside the token so a deploy fails loudly when only one of the pair is set.
+DNS_ZONE_ID=replace-with-zone-id

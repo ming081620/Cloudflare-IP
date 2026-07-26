@@ -4,9 +4,11 @@ set -eu
 
 CONFIG="cf_ip_speed_client"
 SECTION="main"
-WORKER_URL="https://cf.6610000.xyz"
+# Overridable so a self-hosted deployment does not have to patch this script. Read before
+# DEFAULT_DOWNLOAD_URL below, which derives from it.
+WORKER_URL="$(uci -q get "cf_ip_speed_client.main.worker_url" 2>/dev/null || true)"
+[ -n "$WORKER_URL" ] || WORKER_URL="https://cf.6610000.xyz"
 WORKDIR="/tmp/cf-ip-speed-client"
-PAYLOAD="${WORKDIR}/upload.json"
 LOG_FILE="/tmp/cf-ip-speed-client.log"
 CFST_LOG="/tmp/cf-ip-speed-client-cfst.log"
 IP_FILE="/etc/cf-ip-speed-client/ip.txt"
@@ -17,6 +19,10 @@ BACKGROUND_LOG="/tmp/cf-ip-speed-client-background.log"
 BACKGROUND_PID="/tmp/cf-ip-speed-client-background.pid"
 DEFAULT_DOWNLOAD_URL="${WORKER_URL}/__speedtest?bytes=104857600"
 CFST_STABLE_ARGS="-n 60 -t 4 -dn 8 -dt 15 -tlr 0 -p 8"
+# The register and upload calls used to be bare `curl -fsS` — no timeout, no retry — so a
+# single transient 5xx threw away a whole test run. This is also what makes future server-side
+# tightening (rate limits, 429s) survivable for the deployed fleet.
+CURL_API_ARGS="--max-time 45 --retry 3 --retry-delay 10 --retry-connrefused"
 PROXY_SERVICES="nikki openclash passwall passwall2 passwall_server passwall2_server homeproxy shadowsocksr shadowsocks-libev momo sing-box mihomo clash v2raya xray luci-xray nekobox fullcombo fullcombo-shark"
 
 log() {
@@ -204,9 +210,10 @@ register_device() {
 		exit 1
 	fi
 
-	response="$(curl -fsS -X POST "${WORKER_URL}/api/public/register" \
+	# shellcheck disable=SC2086 # CURL_API_ARGS is a deliberate word-split argument list
+	response="$(curl -fsS $CURL_API_ARGS -X POST "${WORKER_URL}/api/public/register" \
 		-H "Content-Type: application/json" \
-		-d "{\"nickname\":\"$(printf '%s' "$nickname" | json_escape)\",\"device_name\":\"$(printf '%s' "$device_name" | json_escape)\"}")"
+		-d "{\"nickname\":\"$(printf '%s' "$nickname" | json_escape)\",\"device_name\":\"$(printf '%s' "$device_name" | json_escape)\"}")" || response=""
 
 	device_id="$(printf '%s' "$response" | jsonfilter -e '@.device_id' 2>/dev/null || true)"
 	device_token="$(printf '%s' "$response" | jsonfilter -e '@.device_token' 2>/dev/null || true)"
@@ -582,11 +589,24 @@ run_cfst_for_version() {
 }
 EOF
 
-	response="$(curl -fsS -X POST "${WORKER_URL}/api/public/upload" -H "Content-Type: application/json" --data-binary "@${payload_file}")"
+	# shellcheck disable=SC2086 # CURL_API_ARGS is a deliberate word-split argument list
+	response="$(curl -fsS $CURL_API_ARGS -X POST "${WORKER_URL}/api/public/upload" -H "Content-Type: application/json" --data-binary "@${payload_file}")" || response=""
+	# The payload carries the plaintext device_token; it used to sit in /tmp until reboot.
+	rm -f "$payload_file"
+
 	ok="$(printf '%s' "$response" | jsonfilter -e '@.success' 2>/dev/null || true)"
 	if [ "$ok" != "true" ]; then
 		set_status "error" "${label} 上传失败：$response"
 		return 1
+	fi
+
+	# The server drops implausible or non-Cloudflare nodes rather than rejecting the run, so
+	# surface that instead of reporting an unqualified success.
+	dropped="$(printf '%s' "$response" | jsonfilter -e '@.dropped' 2>/dev/null || true)"
+	first_warning="$(printf '%s' "$response" | jsonfilter -e '@.warnings[0]' 2>/dev/null || true)"
+	if [ -n "$dropped" ] && [ "$dropped" != "0" ]; then
+		log "${label} server dropped ${dropped} node(s): ${first_warning}"
+		set_status "ok" "${label} 上传成功（${dropped} 个节点被服务端丢弃：${first_warning}）"
 	fi
 
 	new_device_id="$(printf '%s' "$response" | jsonfilter -e '@.device_id' 2>/dev/null || true)"

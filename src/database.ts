@@ -1,4 +1,7 @@
-import type { Carrier, DirectCheckResult, IpVersion, NodeRecord, PublicAggregate, RegisterResult, ServerGeo } from './types';
+import { ipPrefix } from './cf-ranges';
+import { logEvent } from './observability';
+import { judgeKeySupport } from './trust';
+import type { Carrier, DirectCheckResult, GeoSource, IpVersion, NodeRecord, PublicAggregate, RegisterResult, ServerGeo, TrustLevel } from './types';
 import { carrierLabel } from './utils';
 
 const DEVICE_TOKEN_BYTES = 24;
@@ -20,6 +23,8 @@ const NICKNAME_DENY_PATTERNS = [
 interface RegisterInput {
   nickname: string;
   deviceName?: string;
+  /** cf-connecting-ip, recorded so abuse response can group by network. */
+  clientIp?: string;
 }
 
 interface UploadInput {
@@ -30,6 +35,15 @@ interface UploadInput {
   clientRegion?: string;
   clientCarrier?: Carrier;
   directCheck: DirectCheckResult;
+  /** serverHardVerdict().ok — derived from request.cf only, never from the payload. */
+  sourceTrusted: boolean;
+  trustReasons: string[];
+  geoSource: GeoSource;
+  /** True when the client claimed a province the server had already resolved differently. */
+  geoConflict: boolean;
+  /** cf-connecting-ip. Distinct from directCheck.egress_ip, which is the client's claim. */
+  clientIp?: string;
+  clientVersion?: string;
   nodes: NodeRecord[];
 }
 
@@ -91,17 +105,16 @@ export async function registerDevice(db: D1Database, input: RegisterInput): Prom
   const tokenHash = await sha256(deviceToken);
   const now = new Date().toISOString();
 
+  const clientIp = input.clientIp ?? '';
+
   await db.batch([
     db.prepare('INSERT INTO users (id, nickname, status, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5)').bind(userId, nickname, 'active', now, now),
-    db.prepare('INSERT INTO devices (id, user_id, token_hash, device_name, status, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)').bind(
-      deviceId,
-      userId,
-      tokenHash,
-      input.deviceName ?? '',
-      'active',
-      now,
-      now
-    )
+    db
+      .prepare(
+        `INSERT INTO devices (id, user_id, token_hash, device_name, status, created_at, last_seen_at, created_ip, created_ip_prefix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+      )
+      .bind(deviceId, userId, tokenHash, input.deviceName ?? '', 'active', now, now, clientIp, ipPrefix(clientIp))
   ]);
 
   return {
@@ -186,7 +199,13 @@ export async function recordPublicUpload(db: D1Database, input: UploadInput): Pr
   const proxySuspected = input.directCheck.proxy_suspected ? 1 : 0;
   const serverCarrier = input.serverGeo.carrier;
   const serverProvinceCode = input.serverGeo.province_code;
-  const trusted = proxySuspected === 0 && serverCarrier !== 'other' && serverProvinceCode !== 'unknown';
+  // sourceTrusted comes from request.cf alone and is ANDed in last, so no request-body field
+  // can promote an upload into the set that steers DNS.
+  const uploadTrusted =
+    input.sourceTrusted && proxySuspected === 0 && serverCarrier !== 'other' && serverProvinceCode !== 'unknown';
+
+  const clientIp = input.clientIp ?? input.serverGeo.ip;
+  const trustLevel: TrustLevel = uploadTrusted ? 'confirmed' : 'untrusted';
 
   const statements = [
     db
@@ -194,15 +213,17 @@ export async function recordPublicUpload(db: D1Database, input: UploadInput): Pr
         `INSERT INTO uploads (
           id, device_id, nickname, ip_version, client_ip, cf_country, cf_region, cf_city, cf_asn, cf_as_organization,
           server_province_code, server_province_name, server_carrier, client_region, client_carrier,
-          proxy_suspected, route_interface, egress_ip, egress_asn, direct_check_json, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)`
+          proxy_suspected, route_interface, egress_ip, egress_asn, direct_check_json, created_at,
+          cf_client_ip_prefix, cf_colo, cf_client_tcp_rtt, geo_source, geo_conflict, trust_level, trust_reasons, client_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+                  ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)`
       )
       .bind(
         uploadId,
         input.deviceId,
         input.nickname,
         input.ipVersion,
-        input.serverGeo.ip,
+        clientIp,
         input.serverGeo.country ?? '',
         input.serverGeo.region ?? '',
         input.serverGeo.city ?? '',
@@ -218,19 +239,29 @@ export async function recordPublicUpload(db: D1Database, input: UploadInput): Pr
         input.directCheck.egress_ip ?? '',
         input.directCheck.egress_asn ?? '',
         JSON.stringify(input.directCheck),
-        now
+        now,
+        ipPrefix(clientIp),
+        input.serverGeo.colo ?? '',
+        input.serverGeo.clientTcpRtt ?? null,
+        input.geoSource,
+        input.geoConflict ? 1 : 0,
+        trustLevel,
+        input.trustReasons.join(','),
+        input.clientVersion ?? ''
       ),
     db.prepare('UPDATE devices SET last_seen_at = ?1 WHERE id = ?2').bind(now, input.deviceId),
     db.prepare('UPDATE users SET last_seen_at = ?1 WHERE nickname = ?2').bind(now, input.nickname)
   ];
 
   for (const node of input.nodes) {
+    const nodeEligible = node.dns_eligible !== false;
     statements.push(
       db
         .prepare(
           `INSERT INTO node_results (
-            id, upload_id, ip, port, carrier, latency, speed, loss, tls, colo, region, source, trusted, created_at
-          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`
+            id, upload_id, ip, port, carrier, latency, speed, loss, tls, colo, region, source, trusted, created_at,
+            cf_range_ok, dns_eligible, demote_reason
+          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`
         )
         .bind(
           crypto.randomUUID(),
@@ -245,8 +276,16 @@ export async function recordPublicUpload(db: D1Database, input: UploadInput): Pr
           node.colo ?? '',
           node.region ?? '',
           node.source ?? '',
-          trusted ? 1 : 0,
-          now
+          // trusted still gates aggregation: it needs BOTH a trustworthy source and a
+          // plausible measurement. dns_eligible records only the latter, so the admin view
+          // can tell "we distrust your network" apart from "we distrust this reading".
+          uploadTrusted && nodeEligible ? 1 : 0,
+          now,
+          // Every node that survives parsing passed the Cloudflare-range check; the ones that
+          // did not were dropped and never reach here.
+          1,
+          nodeEligible ? 1 : 0,
+          node.demote_reason ?? ''
         )
     );
   }
@@ -255,82 +294,211 @@ export async function recordPublicUpload(db: D1Database, input: UploadInput): Pr
   return uploadId;
 }
 
+/** ASN → carrier, loaded once per isolate. The table changes about never. */
+let carrierAsnCache: Map<number, Carrier> | undefined;
+
+export async function loadCarrierAsns(db: D1Database): Promise<Map<number, Carrier>> {
+  if (carrierAsnCache) {
+    return carrierAsnCache;
+  }
+  const rows = await db.prepare('SELECT asn, carrier FROM carrier_asns').all<{ asn: number; carrier: Carrier }>();
+  carrierAsnCache = new Map((rows.results ?? []).map((row) => [row.asn, row.carrier]));
+  return carrierAsnCache;
+}
+
+export interface DeviceStanding {
+  age_hours: number;
+  confirmed_uploads: number;
+}
+
+export async function loadDeviceStanding(db: D1Database, deviceId: string): Promise<DeviceStanding> {
+  const row = await db
+    .prepare(
+      `SELECT
+         devices.created_at,
+         (SELECT COUNT(*) FROM uploads WHERE uploads.device_id = devices.id AND uploads.trust_level = 'confirmed') AS confirmed_uploads
+       FROM devices WHERE devices.id = ?1`
+    )
+    .bind(deviceId)
+    .first<{ created_at: string; confirmed_uploads: number }>();
+
+  if (!row) {
+    return { age_hours: 0, confirmed_uploads: 0 };
+  }
+  return {
+    age_hours: Math.max(0, (Date.now() - Date.parse(row.created_at)) / 3600000),
+    confirmed_uploads: row.confirmed_uploads ?? 0
+  };
+}
+
+export async function loadDevicePin(db: D1Database, deviceId: string): Promise<{ province_code: string; carrier: Carrier } | undefined> {
+  const row = await db
+    .prepare('SELECT province_code, carrier FROM device_pins WHERE device_id = ?1')
+    .bind(deviceId)
+    .first<{ province_code: string; carrier: Carrier }>();
+  return row ?? undefined;
+}
+
+/**
+ * Server-observed geo history for a device. Only reads rows whose province came from the edge
+ * or an admin pin — reading client-attributed rows would let one poisoned upload calibrate
+ * every later one.
+ */
+export async function loadDeviceHistoryGeo(db: D1Database, deviceId: string, sinceHours: number) {
+  const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000).toISOString();
+  return db
+    .prepare(
+      `SELECT server_province_code AS province_code, server_province_name AS province_name,
+              server_carrier AS carrier, cf_asn, geo_source
+       FROM uploads
+       WHERE device_id = ?1
+         AND created_at >= ?2
+         AND geo_source IN ('cf', 'pin', 'attested')
+         AND server_province_code != 'unknown'
+         AND server_carrier IN ('ct', 'cm', 'cu')
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .bind(deviceId, since)
+    .first<{ province_code: string; province_name: string; carrier: Carrier; cf_asn?: number; geo_source: GeoSource }>();
+}
+
+export async function countRecentDevicesForPrefix(db: D1Database, prefix: string, windowHours: number): Promise<number> {
+  const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total FROM devices WHERE created_ip_prefix = ?1 AND created_at >= ?2')
+    .bind(prefix, since)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
+export async function isPrefixBlocked(db: D1Database, prefix: string): Promise<boolean> {
+  const row = await db.prepare('SELECT 1 AS hit FROM blocked_prefixes WHERE prefix = ?1').bind(prefix).first<{ hit: number }>();
+  return Boolean(row);
+}
+
+export async function blockPrefix(db: D1Database, prefix: string, reason: string): Promise<void> {
+  await db
+    .prepare('INSERT INTO blocked_prefixes (prefix, reason, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(prefix) DO UPDATE SET reason = excluded.reason')
+    .bind(prefix, reason, new Date().toISOString())
+    .run();
+}
+
+export async function unblockPrefix(db: D1Database, prefix: string): Promise<void> {
+  await db.prepare('DELETE FROM blocked_prefixes WHERE prefix = ?1').bind(prefix).run();
+}
+
+export interface TrustReportRow {
+  province_code: string;
+  carrier: Carrier;
+  ip_version: IpVersion;
+  uploads: number;
+  devices: number;
+  prefixes: number;
+  confirmed: number;
+  untrusted: number;
+  conflicts: number;
+  geo_from_cf: number;
+  geo_from_client: number;
+}
+
+/**
+ * Answers the question the enforce/shadow decision hinges on: for each (province, carrier,
+ * version), how much of the data is server-attributed versus client-attributed, and how many
+ * genuinely independent networks stand behind it.
+ */
+export async function trustReport(db: D1Database, windowHours: number): Promise<TrustReportRow[]> {
+  const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const rows = await db
+    .prepare(
+      `SELECT
+         server_province_code AS province_code,
+         server_carrier AS carrier,
+         ip_version,
+         COUNT(*) AS uploads,
+         COUNT(DISTINCT device_id) AS devices,
+         COUNT(DISTINCT NULLIF(cf_client_ip_prefix, '')) AS prefixes,
+         SUM(CASE WHEN trust_level = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+         SUM(CASE WHEN trust_level = 'untrusted' THEN 1 ELSE 0 END) AS untrusted,
+         SUM(geo_conflict) AS conflicts,
+         SUM(CASE WHEN geo_source = 'cf' THEN 1 ELSE 0 END) AS geo_from_cf,
+         SUM(CASE WHEN geo_source = 'client_narrow' THEN 1 ELSE 0 END) AS geo_from_client
+       FROM uploads
+       WHERE created_at >= ?1
+       GROUP BY server_province_code, server_carrier, ip_version
+       ORDER BY uploads DESC`
+    )
+    .bind(since)
+    .all<TrustReportRow>();
+  return rows.results ?? [];
+}
+
 export async function rebuildAggregates(db: D1Database, rootDomain: string): Promise<PublicAggregate[]> {
   const since = new Date(Date.now() - AGGREGATE_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
   const rows = await db
     .prepare(
+      // The IPv6 province/carrier back-fill that used to live here as a recent_v4 CTE is gone:
+      // calibrateIpv6Geo already applies it at write time, with stricter rules (6h window, and
+      // it requires country='CN'). Having both meant a row could be stored under one province
+      // and aggregated under another.
       `WITH latest_uploads AS (
-         SELECT device_id, ip_version, MAX(created_at) AS created_at
-         FROM uploads
-         GROUP BY device_id, ip_version
+         SELECT id, nickname, ip_version, server_province_code, server_province_name, server_carrier
+         FROM (
+           SELECT
+             uploads.id,
+             uploads.nickname,
+             uploads.ip_version,
+             uploads.server_province_code,
+             uploads.server_province_name,
+             uploads.server_carrier,
+             ROW_NUMBER() OVER (
+               PARTITION BY uploads.device_id, uploads.ip_version
+               ORDER BY uploads.created_at DESC, uploads.id DESC
+             ) AS recency
+           FROM uploads
+           JOIN devices ON devices.id = uploads.device_id
+           JOIN users ON users.id = devices.user_id
+           WHERE uploads.created_at >= ?1
+             AND devices.status = 'active'
+             AND users.status = 'active'
+             AND uploads.proxy_suspected = 0
+             AND uploads.server_province_code != 'unknown'
+             AND uploads.server_carrier IN ('ct', 'cm', 'cu')
+         )
+         WHERE recency = 1
        ),
-       recent_v4 AS (
+       ranked AS (
          SELECT
-           device_id,
-           server_province_code,
-           server_province_name,
-           server_carrier,
-           cf_asn,
-           ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY created_at DESC) AS row_number
-         FROM uploads
-         WHERE ip_version = 'v4'
-           AND proxy_suspected = 0
-           AND server_province_code != 'unknown'
-           AND server_carrier IN ('ct', 'cm', 'cu')
-           AND created_at >= ?1
+           latest_uploads.id AS upload_id,
+           latest_uploads.nickname,
+           latest_uploads.ip_version,
+           latest_uploads.server_province_code,
+           latest_uploads.server_province_name,
+           latest_uploads.server_carrier,
+           node_results.ip,
+           node_results.port,
+           node_results.speed,
+           node_results.latency,
+           node_results.loss,
+           node_results.colo,
+           node_results.created_at,
+           ROW_NUMBER() OVER (
+             PARTITION BY latest_uploads.server_province_code, latest_uploads.server_carrier, latest_uploads.ip_version
+             ORDER BY node_results.speed DESC, node_results.latency ASC, node_results.ip ASC
+           ) AS rank
+         FROM node_results
+         JOIN latest_uploads ON latest_uploads.id = node_results.upload_id
+         WHERE node_results.trusted = 1
+           AND node_results.created_at >= ?1
+           AND TRIM(UPPER(node_results.colo)) NOT IN ('', 'N/A')
        )
        SELECT
-        uploads.id AS upload_id,
-        uploads.nickname,
-        uploads.ip_version,
-        CASE
-          WHEN uploads.ip_version = 'v6'
-           AND recent_v4.row_number = 1
-           AND (recent_v4.server_carrier = uploads.server_carrier OR recent_v4.cf_asn = uploads.cf_asn)
-          THEN recent_v4.server_province_code
-          ELSE uploads.server_province_code
-        END AS server_province_code,
-        CASE
-          WHEN uploads.ip_version = 'v6'
-           AND recent_v4.row_number = 1
-           AND (recent_v4.server_carrier = uploads.server_carrier OR recent_v4.cf_asn = uploads.cf_asn)
-          THEN recent_v4.server_province_name
-          ELSE uploads.server_province_name
-        END AS server_province_name,
-        CASE
-          WHEN uploads.ip_version = 'v6'
-           AND recent_v4.row_number = 1
-           AND (recent_v4.server_carrier = uploads.server_carrier OR recent_v4.cf_asn = uploads.cf_asn)
-          THEN recent_v4.server_carrier
-          ELSE uploads.server_carrier
-        END AS server_carrier,
-        node_results.ip,
-        node_results.port,
-        node_results.speed,
-        node_results.latency,
-        node_results.loss,
-        node_results.colo,
-        node_results.created_at
-       FROM node_results
-       JOIN uploads ON uploads.id = node_results.upload_id
-       JOIN devices ON devices.id = uploads.device_id
-       JOIN users ON users.id = devices.user_id
-       JOIN latest_uploads
-         ON latest_uploads.device_id = uploads.device_id
-        AND latest_uploads.ip_version = uploads.ip_version
-        AND latest_uploads.created_at = uploads.created_at
-       LEFT JOIN recent_v4
-         ON recent_v4.device_id = uploads.device_id
-        AND recent_v4.row_number = 1
-       WHERE node_results.trusted = 1
-         AND devices.status = 'active'
-         AND users.status = 'active'
-         AND uploads.server_province_code != 'unknown'
-         AND uploads.server_carrier IN ('ct', 'cm', 'cu')
-         AND TRIM(UPPER(node_results.colo)) NOT IN ('', 'N/A')
-         AND node_results.created_at >= ?1
-       ORDER BY node_results.speed DESC, node_results.latency ASC
-       LIMIT 1000`
+         upload_id, nickname, ip_version, server_province_code, server_province_name, server_carrier,
+         ip, port, speed, latency, loss, colo, created_at
+       FROM ranked
+       WHERE rank = 1
+       ORDER BY server_province_code ASC, server_carrier ASC, ip_version ASC
+       LIMIT 500`
     )
     .bind(since)
     .all<{
@@ -349,24 +517,21 @@ export async function rebuildAggregates(db: D1Database, rootDomain: string): Pro
       created_at: string;
     }>();
 
-  const bestByKey = new Map<string, PublicAggregate>();
-  for (const row of rows.results ?? []) {
+  // The query now returns at most one row per key, so this is a straight projection rather
+  // than a dedupe pass.
+  const aggregates: PublicAggregate[] = (rows.results ?? []).map((row) => {
     const ipVersion = row.ip_version === 'v6' ? 'v6' : 'v4';
-    const key = `${row.server_province_code}:${row.server_carrier}:${ipVersion}`;
-    if (bestByKey.has(key)) {
-      continue;
-    }
-    const hostname = ipVersion === 'v6'
-      ? `${row.server_province_code}.${row.server_carrier}.v6.${rootDomain}`
-      : `${row.server_province_code}.${row.server_carrier}.${rootDomain}`;
-    bestByKey.set(key, {
-      key,
+    return {
+      key: `${row.server_province_code}:${row.server_carrier}:${ipVersion}`,
       ip_version: ipVersion,
       province_code: row.server_province_code,
       province_name: row.server_province_name,
       carrier: row.server_carrier,
       carrier_label: carrierLabel(row.server_carrier),
-      hostname,
+      hostname:
+        ipVersion === 'v6'
+          ? `${row.server_province_code}.${row.server_carrier}.v6.${rootDomain}`
+          : `${row.server_province_code}.${row.server_carrier}.${rootDomain}`,
       ip: row.ip,
       port: row.port,
       record_type: ipVersion === 'v6' ? 'AAAA' : 'A',
@@ -377,44 +542,157 @@ export async function rebuildAggregates(db: D1Database, rootDomain: string): Pro
       nickname: row.nickname,
       upload_id: row.upload_id,
       updated_at: row.created_at
-    });
+    };
+  });
+
+  // Corroboration: decide which keys have enough independent backing to steer DNS. Rows that
+  // fall short stay in the table and on the panel as candidates, they just do not reach dns.ts.
+  const support = await loadKeySupport(db, AGGREGATE_WINDOW_HOURS);
+  for (const aggregate of aggregates) {
+    const evidence = support.get(aggregate.key);
+    const verdict = evidence
+      ? judgeKeySupport(evidence)
+      : { eligible: false, rule: 'none', tier: 'candidate' as const };
+    aggregate.trust_level = verdict.tier;
+    aggregate.support_rule = verdict.rule;
+    aggregate.support_devices = evidence?.devices ?? 0;
   }
 
-  const aggregates = [...bestByKey.values()];
-  await db.prepare('DELETE FROM aggregates').run();
-  if (aggregates.length) {
-    await db.batch(
-      aggregates.map((item) =>
-        db
-          .prepare(
+  if (!aggregates.length) {
+    // An empty result is a query fault far more often than it is a genuine "no data", and the
+    // old unconditional DELETE turned it into an outage: /api/public/latest fell through to an
+    // empty table and the DNS reconciler deleted every record. Keep serving what we have.
+    logEvent('warn', 'aggregates_empty_skipped', { window_hours: AGGREGATE_WINDOW_HOURS });
+    return await readAggregates(db);
+  }
+
+  // Generation stamp instead of DELETE-then-insert: the upsert and the prune of last
+  // generation's rows go in one batch, which D1 runs as a transaction, so the table is never
+  // observed empty. It also avoids a ~190-parameter `key NOT IN (...)` list.
+  const builtAt = new Date().toISOString();
+  await db.batch([
+    ...aggregates.map((item) =>
+      db
+        .prepare(
           `INSERT INTO aggregates (
               key, ip_version, province_code, province_name, carrier, hostname, ip, port, record_type,
-              speed, latency, loss, colo, nickname, upload_id, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`
-          )
-          .bind(
-            item.key,
-            item.ip_version,
-            item.province_code,
-            item.province_name,
-            item.carrier,
-            item.hostname,
-            item.ip,
-            item.port,
-            item.record_type,
-            item.speed,
-            item.latency,
-            item.loss,
-            item.colo ?? '',
-            item.nickname,
-            item.upload_id,
-            item.updated_at
-          )
-      )
-    );
-  }
+              speed, latency, loss, colo, nickname, upload_id, updated_at, built_at,
+              trust_level, support_devices, support_rule
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            ON CONFLICT(key) DO UPDATE SET
+              ip_version = excluded.ip_version,
+              province_code = excluded.province_code,
+              province_name = excluded.province_name,
+              carrier = excluded.carrier,
+              hostname = excluded.hostname,
+              ip = excluded.ip,
+              port = excluded.port,
+              record_type = excluded.record_type,
+              speed = excluded.speed,
+              latency = excluded.latency,
+              loss = excluded.loss,
+              colo = excluded.colo,
+              nickname = excluded.nickname,
+              upload_id = excluded.upload_id,
+              updated_at = excluded.updated_at,
+              built_at = excluded.built_at,
+              trust_level = excluded.trust_level,
+              support_devices = excluded.support_devices,
+              support_rule = excluded.support_rule`
+        )
+        .bind(
+          item.key,
+          item.ip_version,
+          item.province_code,
+          item.province_name,
+          item.carrier,
+          item.hostname,
+          item.ip,
+          item.port,
+          item.record_type,
+          item.speed,
+          item.latency,
+          item.loss,
+          item.colo ?? '',
+          item.nickname,
+          item.upload_id,
+          item.updated_at,
+          builtAt,
+          item.trust_level ?? 'candidate',
+          item.support_devices ?? 0,
+          item.support_rule ?? 'none'
+        )
+    ),
+    db.prepare('DELETE FROM aggregates WHERE built_at != ?1').bind(builtAt)
+  ]);
 
   return aggregates;
+}
+
+export interface KeySupport {
+  key: string;
+  devices: number;
+  prefixes: number;
+  /** Longest-standing contributor for this key, used by the sole-contributor rule. */
+  oldest_device_age_hours: number;
+  best_device_confirmed_uploads: number;
+  best_device_active_days: number;
+  best_device_distinct_keys: number;
+  pinned: number;
+}
+
+/**
+ * Corroboration evidence per (province, carrier, ip_version).
+ *
+ * Counting devices alone is useless: registration is unauthenticated and free, so device
+ * supply is unbounded. Distinct `cf_client_ip_prefix` is the discriminating signal — an
+ * attacker on one residential line can mint fifty devices and still has one prefix.
+ */
+export async function loadKeySupport(db: D1Database, windowHours: number): Promise<Map<string, KeySupport>> {
+  const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const rows = await db
+    .prepare(
+      `WITH scoped AS (
+         SELECT
+           uploads.server_province_code || ':' || uploads.server_carrier || ':' || uploads.ip_version AS key,
+           uploads.device_id,
+           NULLIF(uploads.cf_client_ip_prefix, '') AS prefix,
+           devices.created_at AS device_created_at
+         FROM uploads
+         JOIN devices ON devices.id = uploads.device_id
+         WHERE uploads.created_at >= ?1
+           AND uploads.trust_level IN ('confirmed', 'legacy')
+           AND uploads.server_province_code != 'unknown'
+           AND uploads.server_carrier IN ('ct', 'cm', 'cu')
+       ),
+       device_stats AS (
+         SELECT
+           uploads.device_id,
+           COUNT(*) AS confirmed_uploads,
+           COUNT(DISTINCT substr(uploads.created_at, 1, 10)) AS active_days,
+           COUNT(DISTINCT uploads.server_province_code || ':' || uploads.server_carrier) AS distinct_keys
+         FROM uploads
+         WHERE uploads.trust_level IN ('confirmed', 'legacy')
+         GROUP BY uploads.device_id
+       )
+       SELECT
+         scoped.key,
+         COUNT(DISTINCT scoped.device_id) AS devices,
+         COUNT(DISTINCT scoped.prefix) AS prefixes,
+         MAX((julianday('now') - julianday(scoped.device_created_at)) * 24.0) AS oldest_device_age_hours,
+         MAX(COALESCE(device_stats.confirmed_uploads, 0)) AS best_device_confirmed_uploads,
+         MAX(COALESCE(device_stats.active_days, 0)) AS best_device_active_days,
+         MIN(COALESCE(device_stats.distinct_keys, 1)) AS best_device_distinct_keys,
+         MAX(CASE WHEN device_pins.device_id IS NOT NULL THEN 1 ELSE 0 END) AS pinned
+       FROM scoped
+       LEFT JOIN device_stats ON device_stats.device_id = scoped.device_id
+       LEFT JOIN device_pins ON device_pins.device_id = scoped.device_id
+       GROUP BY scoped.key`
+    )
+    .bind(since)
+    .all<KeySupport>();
+
+  return new Map((rows.results ?? []).map((row) => [row.key, row]));
 }
 
 export async function readAggregates(db: D1Database): Promise<PublicAggregate[]> {
@@ -439,6 +717,42 @@ export async function readPublicCache(kv: KVNamespace): Promise<unknown | null> 
   return kv.get('public:latest', 'json');
 }
 
+const AGGREGATE_LEASE_KEY = 'aggregate:lease_until';
+
+/**
+ * Single-statement compare-and-swap over system_state. Returns true when this caller took the
+ * lease, false when another one holds it.
+ *
+ * Concurrent uploads used to each run a full rebuild plus a write to the single `public:latest`
+ * KV key, which Cloudflare throttles to roughly one write per second — inside waitUntil, where
+ * the failure is invisible. Losing this race costs at most `cooldownSeconds` of staleness, and
+ * the cron is the authoritative writer regardless.
+ *
+ * ISO-8601 UTC strings sort lexicographically exactly as they sort chronologically, and every
+ * timestamp in this codebase comes from toISOString(), so string comparison is safe here.
+ */
+export async function claimAggregateLease(db: D1Database, cooldownSeconds: number, force = false): Promise<boolean> {
+  const now = new Date().toISOString();
+  const until = new Date(Date.now() + cooldownSeconds * 1000).toISOString();
+
+  if (force) {
+    await writeSystemState(db, AGGREGATE_LEASE_KEY, until);
+    return true;
+  }
+
+  const row = await db
+    .prepare(
+      `INSERT INTO system_state (key, value, updated_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE system_state.value <= ?3
+       RETURNING value`
+    )
+    .bind(AGGREGATE_LEASE_KEY, until, now)
+    .first<{ value: string }>();
+
+  return Boolean(row);
+}
+
 export async function recordDnsUpdate(db: D1Database, hostname: string, recordType: string, ip: string, status: string, response: string): Promise<void> {
   await db
     .prepare('INSERT INTO dns_updates (id, hostname, record_type, ip, status, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
@@ -446,28 +760,36 @@ export async function recordDnsUpdate(db: D1Database, hostname: string, recordTy
     .run();
 }
 
+/**
+ * True when this exact (hostname, type, ip) was already *attempted* inside the window.
+ *
+ * Previously this only counted rows with status='success', which meant that once every write
+ * started failing the throttle stopped engaging entirely and every hostname was retried on
+ * every rebuild — a self-sustaining rate-limit storm. Counting attempts makes the throttle
+ * hold precisely when it matters most. A changed IP has a different key and is still written
+ * immediately, and a record deleted since the attempt is still rewritten.
+ */
 export async function recentlyUpdatedDns(db: D1Database, hostname: string, recordType: string, ip: string, minutes: number): Promise<boolean> {
   const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
   const row = await db
     .prepare(
-      `SELECT success.id
-       FROM dns_updates success
-       WHERE success.hostname = ?1
-         AND success.record_type = ?2
-         AND success.ip = ?3
-         AND success.status = ?4
-         AND success.created_at >= ?5
+      `SELECT attempt.id
+       FROM dns_updates attempt
+       WHERE attempt.hostname = ?1
+         AND attempt.record_type = ?2
+         AND attempt.ip = ?3
+         AND attempt.created_at >= ?4
          AND NOT EXISTS (
            SELECT 1
            FROM dns_updates deleted
-           WHERE deleted.hostname = success.hostname
-             AND deleted.record_type = success.record_type
+           WHERE deleted.hostname = attempt.hostname
+             AND deleted.record_type = attempt.record_type
              AND deleted.status = 'delete_success'
-             AND deleted.created_at >= success.created_at
+             AND deleted.created_at >= attempt.created_at
          )
        LIMIT 1`
     )
-    .bind(hostname, recordType, ip, 'success', since)
+    .bind(hostname, recordType, ip, since)
     .first();
   return Boolean(row);
 }
@@ -496,6 +818,21 @@ export async function listActiveDnsTargets(db: D1Database): Promise<DnsTarget[]>
   return rows.results ?? [];
 }
 
+/** Coordination row store from migration 0005 — ops state that must survive log sampling. */
+export async function readSystemState(db: D1Database, key: string): Promise<string | null> {
+  const row = await db.prepare('SELECT value FROM system_state WHERE key = ?1').bind(key).first<{ value: string }>();
+  return row?.value ?? null;
+}
+
+export async function writeSystemState(db: D1Database, key: string, value: string): Promise<void> {
+  await db
+    .prepare(
+      'INSERT INTO system_state (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+    )
+    .bind(key, value, new Date().toISOString())
+    .run();
+}
+
 export async function listRecentUploads(db: D1Database, limit: number): Promise<unknown[]> {
   const rows = await db
     .prepare(
@@ -512,6 +849,14 @@ export async function listRecentUploads(db: D1Database, limit: number): Promise<
         uploads.egress_ip,
         uploads.egress_asn,
         uploads.created_at,
+        uploads.cf_client_ip_prefix,
+        uploads.cf_colo,
+        uploads.cf_client_tcp_rtt,
+        uploads.geo_source,
+        uploads.geo_conflict,
+        uploads.trust_level,
+        uploads.trust_reasons,
+        uploads.client_version,
         devices.status AS device_status,
         users.status AS user_status
        FROM uploads

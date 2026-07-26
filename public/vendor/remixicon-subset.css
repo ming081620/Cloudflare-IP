@@ -1,0 +1,48 @@
+/*
+ * Remixicon 3.5.0 (Apache-2.0) — subset containing only the 26 glyphs this page uses.
+ * Self-hosted rather than loaded from jsdelivr: that CDN is frequently unreachable for the
+ * mainland-China audience this panel targets, and losing it silently removed every icon.
+ * Regenerate with scripts/build-icons.mjs after adding an icon.
+ */
+@font-face {
+  font-family: "remixicon";
+  src: url("./remixicon.woff2") format("woff2");
+  font-display: swap;
+  font-weight: normal;
+  font-style: normal;
+}
+
+[class^="ri-"],
+[class*=" ri-"] {
+  font-family: "remixicon" !important;
+  font-style: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.ri-checkbox-circle-fill:before { content: "\eb80"; }
+.ri-cloud-line:before { content: "\eb9d"; }
+.ri-code-s-slash-line:before { content: "\ebad"; }
+.ri-cpu-line:before { content: "\ebf0"; }
+.ri-database-2-line:before { content: "\ec16"; }
+.ri-download-2-line:before { content: "\ec54"; }
+.ri-earth-line:before { content: "\ec7a"; }
+.ri-file-copy-line:before { content: "\ecd5"; }
+.ri-flashlight-fill:before { content: "\ed3c"; }
+.ri-github-fill:before { content: "\edca"; }
+.ri-github-line:before { content: "\edcb"; }
+.ri-hard-drive-2-line:before { content: "\edf9"; }
+.ri-heart-pulse-line:before { content: "\ee11"; }
+.ri-information-line:before { content: "\ee59"; }
+.ri-links-line:before { content: "\eeb8"; }
+.ri-loader-4-line:before { content: "\eec6"; }
+.ri-lock-line:before { content: "\eece"; }
+.ri-refresh-line:before { content: "\f064"; }
+.ri-route-line:before { content: "\f09b"; }
+.ri-search-line:before { content: "\f0d1"; }
+.ri-shield-check-line:before { content: "\f100"; }
+.ri-shield-user-line:before { content: "\f10c"; }
+.ri-sparkling-2-fill:before { content: "\f36a"; }
+.ri-terminal-box-fill:before { content: "\f1f5"; }
+.ri-time-line:before { content: "\f20f"; }
+.ri-timer-line:before { content: "\f215"; }

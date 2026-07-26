@@ -1,6 +1,11 @@
 export type Carrier = 'ct' | 'cm' | 'cu' | 'other';
 export type IpVersion = 'v4' | 'v6';
 
+/** Cloudflare's rate-limiting binding. */
+export interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
 export interface Env {
   SPEED_TEST_KV: KVNamespace;
   DB: D1Database;
@@ -9,10 +14,25 @@ export interface Env {
   DNS_API_TOKEN?: string;
   DNS_ZONE_ID?: string;
   DNS_ROOT_DOMAIN?: string;
+  /** Surfaced to the panel so a fork links to its own repository, not this one. */
+  REPO_URL?: string;
+  /** 'shadow' (default) records the stricter model's verdict; 'enforce' lets it govern. */
+  TRUST_ENFORCE?: string;
+  /** '0' retires the pre-crowdtest KV endpoints without a deploy. */
+  LEGACY_API_ENABLED?: string;
   DOMAIN_CT?: string;
   DOMAIN_CM?: string;
   DOMAIN_CU?: string;
+  /** Optional so `wrangler dev` and the regression runner work without the bindings. */
+  UPLOAD_LIMITER?: RateLimiter;
+  REGISTER_LIMITER?: RateLimiter;
+  SPEEDTEST_LIMITER?: RateLimiter;
 }
+
+export type TrustLevel = 'confirmed' | 'candidate' | 'untrusted';
+
+/** Where the stored province/carrier actually came from. */
+export type GeoSource = 'cf' | 'device_history' | 'client_narrow' | 'pin' | 'attested' | 'none';
 
 export interface NodeRecord {
   ip: string;
@@ -26,6 +46,13 @@ export interface NodeRecord {
   region?: string;
   source?: string;
   updated_at: string;
+  /**
+   * False when the measurement is plausible enough to keep as a contribution record but not
+   * to steer a DNS record. Undefined on the legacy KV path, which treats every node alike.
+   */
+  dns_eligible?: boolean;
+  /** Why the node was demoted, for the admin audit view. */
+  demote_reason?: string;
 }
 
 export interface UploadNodeInput {
@@ -57,6 +84,8 @@ export interface PublicUploadPayload extends UploadPayload {
   client_region?: unknown;
   client_carrier?: unknown;
   direct_check?: unknown;
+  /** Reported by the OpenWrt client from 0.2.0 onward; absent on the deployed fleet. */
+  client_version?: unknown;
 }
 
 export interface DirectCheckResult {
@@ -130,6 +159,9 @@ export interface ServerGeo {
   province_code: string;
   province_name: string;
   carrier: Carrier;
+  /** Edge-measured RTT to the uploader, in ms. Set by Cloudflare, not forgeable. */
+  clientTcpRtt?: number;
+  colo?: string;
 }
 
 export interface PublicAggregate {
@@ -150,6 +182,11 @@ export interface PublicAggregate {
   nickname: string;
   upload_id: string;
   updated_at: string;
+  /** 'confirmed' rows steer DNS; 'candidate' rows are shown on the panel but not written. */
+  trust_level?: TrustLevel;
+  support_devices?: number;
+  /** Which corroboration rule granted eligibility: R1, R2, R3 or none. */
+  support_rule?: string;
 }
 
 export type ApiSuccess<T> = {

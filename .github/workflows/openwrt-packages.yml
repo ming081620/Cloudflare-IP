@@ -20,8 +20,7 @@ on:
       release_tag:
         description: "Release tag used only when publish_release is true"
         required: false
-        default: "v0.1.5"
-
+        default: "v0.1.6"
 permissions:
   contents: write
 
@@ -147,4 +146,9 @@ jobs:
             echo "No package files found"
             exit 1
           fi
-          gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" "${packages[@]}" --clobber
+          mapfile -t release_names < <(find release-assets -maxdepth 1 -type f \( -name "*.ipk" -o -name "*.apk" \) -printf "%f\n" | sort)
+          (
+            cd release-assets
+            sha256sum "${release_names[@]}" > SHA256SUMS
+          )
+          gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" "${packages[@]}" release-assets/SHA256SUMS --clobber

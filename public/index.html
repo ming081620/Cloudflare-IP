@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cloudflare 优选 IP 公开众测面板</title>
+  <meta name="description" content="面向 OpenWrt 的 Cloudflare 优选 IP 公开众测、自动测速、可信聚合和省份运营商 DNS 优选平台。">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232563eb'/%3E%3Cpath d='M37 7 18 35h15l-4 22 19-30H33z' fill='white'/%3E%3C/svg%3E">
+  <link rel="preload" href="/vendor/remixicon.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/vendor/remixicon-subset.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-content wrap">
+    <header>
+      <a href="/" class="brand">
+        <div class="brand-icon"><i class="ri-flashlight-fill" aria-hidden="true"></i></div>
+        <div>
+          <h1>Cloudflare 优选 IP 公开众测面板</h1>
+          <p class="sub">OpenWrt 客户端自动测速、检测直连状态、上传结果；面板按省份和运营商聚合最佳 IP。</p>
+        </div>
+      </a>
+      <div class="actions">
+        <a href="https://github.com/10000ge10000/cf-ip-speed-panel" target="_blank" rel="noopener" class="btn" data-repo-link><i class="ri-github-fill" aria-hidden="true"></i> GitHub</a>
+        <button type="button" class="btn primary" id="refreshBtn"><i class="ri-refresh-line" aria-hidden="true"></i> 刷新数据</button>
+      </div>
+    </header>
+
+    <div class="hero-title">
+      <div class="live-tag"><span class="live-dot"></span> 自动聚合运行中 · 每 30 分钟同步</div>
+      <h2>全国各省 Cloudflare 优选 IP<br>实时众测聚合看板</h2>
+      <p>每条推荐都来自 <strong>OpenWrt 真实直连测速</strong>，疑似代理数据不参与 DNS 优选。</p>
+    </div>
+
+    <section class="stats" id="stats" aria-label="总览统计"></section>
+  </div>
+</section>
+
+<main class="main-body wrap">
+  <div id="notice" class="notice" role="status" aria-live="polite"><i class="ri-checkbox-circle-fill" aria-hidden="true"></i><span id="noticeMsg"></span></div>
+
+  <!-- 筛选 -->
+  <div class="filter-panel">
+    <div class="f-row f-between">
+      <div class="f-row" style="gap:8px">
+        <span class="f-label" id="carrierLabel">运营商</span>
+        <div class="chip-group" id="carrierChips" role="group" aria-labelledby="carrierLabel">
+          <button type="button" class="chip active" data-carrier="" aria-pressed="true">全部</button>
+          <button type="button" class="chip" data-carrier="ct" aria-pressed="false">中国电信</button>
+          <button type="button" class="chip" data-carrier="cm" aria-pressed="false">中国移动</button>
+          <button type="button" class="chip" data-carrier="cu" aria-pressed="false">中国联通</button>
+        </div>
+      </div>
+      <div class="search-box">
+        <i class="ri-search-line" aria-hidden="true"></i>
+        <label class="sr-only" for="searchInput">搜索省份、域名或 IP</label>
+        <input type="search" id="searchInput" placeholder="搜索省份、域名、IP...">
+      </div>
+    </div>
+    <hr class="f-divider">
+    <div class="f-row f-between">
+      <div class="f-row" style="gap:8px">
+        <span class="f-label" id="ipVersionLabel">类型</span>
+        <div class="chip-group" id="ipVersionChips" role="group" aria-labelledby="ipVersionLabel">
+          <button type="button" class="chip active" data-ip-version="" aria-pressed="true">全部</button>
+          <button type="button" class="chip" data-ip-version="v4" aria-pressed="false">IPv4</button>
+          <button type="button" class="chip" data-ip-version="v6" aria-pressed="false">IPv6</button>
+        </div>
+        <label class="f-label" style="margin-left:8px" for="sortSelect">排序</label>
+        <div class="sel-wrap">
+          <select id="sortSelect">
+            <option value="province">省份排序</option>
+            <option value="speed">按速度降序</option>
+            <option value="latency">按延迟升序</option>
+          </select>
+        </div>
+      </div>
+      <span class="f-meta" id="resultCount"></span>
+    </div>
+    <hr class="f-divider">
+    <div class="f-row">
+      <span class="f-label" id="provinceLabel">省份</span>
+      <div class="chip-group" id="provinceChips" role="group" aria-labelledby="provinceLabel">
+        <button type="button" class="chip active" data-province="" aria-pressed="true">全部</button>
+      </div>
+    </div>
+    <span class="f-meta" id="updatedAt">等待加载</span>
+  </div>
+
+  <!-- 节点列表 -->
+  <div class="toolbar">
+    <h2><i class="ri-sparkling-2-fill" aria-hidden="true"></i> 各省优选 IP 列表</h2>
+  </div>
+  <section id="aggregates" class="grid" aria-live="polite" aria-busy="true"></section>
+
+  <!-- 安装 -->
+  <section class="setup-panel" id="install">
+    <h2><i class="ri-terminal-box-fill" aria-hidden="true"></i> OpenWrt 客户端部署</h2>
+    <p class="setup-desc">在路由器 SSH 终端运行以下命令，一键安装 CloudflareSpeedTest 与 LuCI 管理插件。</p>
+    <div class="codeblk">
+      <button type="button" class="cbtn" id="copyInstallBtn"><i class="ri-file-copy-line" aria-hidden="true"></i> 复制</button>
+      <pre id="installCommand">sh -c "$(wget -O- https://raw.githubusercontent.com/10000ge10000/cf-ip-speed-panel/main/scripts/install-openwrt.sh)"</pre>
+    </div>
+    <div class="info-grid">
+      <div class="info-block">
+        <h3><i class="ri-information-line" style="color:var(--blue)" aria-hidden="true"></i> 这是什么</h3>
+        <p>公开众测 Cloudflare 优选 IP。每条推荐都来自 OpenWrt 客户端的真实直连测速。</p>
+      </div>
+      <div class="info-block">
+        <h3><i class="ri-shield-check-line" style="color:var(--green)" aria-hidden="true"></i> 防代理污染</h3>
+        <p>测速前自动暂停 Passwall / OpenClash 等代理服务，完成后自动恢复，保证数据真实。</p>
+      </div>
+      <div class="info-block">
+        <h3><i class="ri-route-line" style="color:var(--purple)" aria-hidden="true"></i> IPv6 智能校准</h3>
+        <p>结合同设备 IPv4 出口信息，自动修正 IPv6 省份与运营商归属识别精度。</p>
+      </div>
+      <div class="info-block">
+        <h3><i class="ri-time-line" style="color:#d97706" aria-hidden="true"></i> 闲时定时测速</h3>
+        <p>支持 cron 定时任务，建议凌晨 3~5 点运行，对正常上网零干扰。</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- 页脚 -->
+<footer class="footer">
+  <div class="ft-bar"></div>
+  <div class="ft-grid"></div>
+  <div class="ft-main">
+    <div class="ft-brand">
+      <a href="/" class="ft-brand-logo">
+        <div class="ft-brand-icon"><i class="ri-flashlight-fill" aria-hidden="true"></i></div>
+        <span class="ft-brand-name">Cloudflare IP 优选助手</span>
+      </a>
+      <p class="ft-brand-desc">面向 OpenWrt 的 Cloudflare 优选 IP 公开众测平台。每条推荐都来自真实直连测速，疑似代理数据不参与 DNS 优选。</p>
+      <div class="ft-pills">
+        <span class="ft-pill"><i class="ri-cloud-line" aria-hidden="true"></i> Workers</span>
+        <span class="ft-pill"><i class="ri-database-2-line" aria-hidden="true"></i> D1</span>
+        <span class="ft-pill"><i class="ri-hard-drive-2-line" aria-hidden="true"></i> KV</span>
+        <span class="ft-pill"><i class="ri-cpu-line" aria-hidden="true"></i> OpenWrt</span>
+      </div>
+    </div>
+    <div class="ft-col">
+      <h4>快捷域名</h4>
+      <!-- Filled from the live aggregates, so a self-hosted fork never advertises the
+           upstream's hostnames. -->
+      <ul class="ft-links" id="quickDomains">
+        <li><span class="ft-static"><i class="ri-links-line" aria-hidden="true"></i> 加载中…</span></li>
+      </ul>
+    </div>
+    <div class="ft-col">
+      <h4>开发者</h4>
+      <ul class="ft-links">
+        <li><a href="/api/public/latest" target="_blank" rel="noopener"><i class="ri-code-s-slash-line" aria-hidden="true"></i> 公开 API</a></li>
+        <li><a href="https://github.com/10000ge10000/cf-ip-speed-panel" target="_blank" rel="noopener" data-repo-link><i class="ri-github-line" aria-hidden="true"></i> 源码仓库</a></li>
+        <li><a href="https://github.com/10000ge10000/cf-ip-speed-panel/releases" target="_blank" rel="noopener" data-repo-link="/releases"><i class="ri-download-2-line" aria-hidden="true"></i> 插件下载</a></li>
+        <li><a href="/" ><i class="ri-earth-line" aria-hidden="true"></i> 项目主页</a></li>
+      </ul>
+    </div>
+    <div class="ft-col">
+      <h4>安全合规</h4>
+      <ul class="ft-links">
+        <li><span class="ft-static"><i class="ri-shield-user-line" aria-hidden="true"></i> 代理出口自动过滤</span></li>
+        <li><span class="ft-static"><i class="ri-lock-line" aria-hidden="true"></i> Token SHA-256 哈希</span></li>
+        <li><span class="ft-static"><i class="ri-timer-line" aria-hidden="true"></i> 30 分钟定时聚合</span></li>
+        <li><span class="ft-static"><i class="ri-heart-pulse-line" aria-hidden="true"></i> 系统正常运行</span></li>
+      </ul>
+    </div>
+  </div>
+  <div class="ft-bottom">
+    <div>© 2026 Cloudflare IP 优选助手 · <a href="https://github.com/10000ge10000/cf-ip-speed-panel/blob/main/LICENSE" target="_blank" rel="noopener" data-repo-link="/blob/main/LICENSE">MIT License</a></div>
+    <div class="ft-blinks">
+      <a href="/">项目主页</a>
+      <a href="https://github.com/10000ge10000/cf-ip-speed-panel" target="_blank" rel="noopener" data-repo-link>GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

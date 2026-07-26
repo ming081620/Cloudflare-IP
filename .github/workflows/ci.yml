@@ -28,6 +28,19 @@ jobs:
       - name: Typecheck
         run: npm run check
 
+      - name: Lint
+        run: npm run lint
+
+      # AGENTS.md has required this since the start; CI never actually ran it.
+      - name: Test
+        run: npm test
+
+      # The icon subset is generated, so a stale checked-in copy would silently drop glyphs.
+      - name: Icon subset is up to date
+        run: |
+          npm run build:icons
+          git diff --exit-code -- public/vendor
+
   openwrt-static:
     name: OpenWrt static checks
     runs-on: ubuntu-latest
@@ -39,6 +52,21 @@ jobs:
         run: |
           sh -n openwrt-packages/cf-ip-speed-client/files/usr/bin/cf-ip-speed-client
           sh -n openwrt-packages/cf-ip-speed-client/files/etc/init.d/cf-ip-speed-client
+          sh -n scripts/install-openwrt.sh
+          sh -n scripts/poc-upload.sh
+
+      # Non-blocking for now: an 800-line POSIX client produces a wall of style warnings, and a
+      # check that fails on day one is a check that gets deleted. Promote to blocking once the
+      # intentional ones are recorded in .shellcheckrc.
+      - name: ShellCheck (advisory)
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -s sh -e SC1091 \
+            openwrt-packages/cf-ip-speed-client/files/usr/bin/cf-ip-speed-client \
+            openwrt-packages/cf-ip-speed-client/files/etc/init.d/cf-ip-speed-client \
+            scripts/install-openwrt.sh \
+            scripts/poc-upload.sh
 
       - name: LuCI ASCII transport check
         run: |
