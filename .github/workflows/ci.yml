@@ -55,11 +55,7 @@ jobs:
           sh -n scripts/install-openwrt.sh
           sh -n scripts/poc-upload.sh
 
-      # Non-blocking for now: an 800-line POSIX client produces a wall of style warnings, and a
-      # check that fails on day one is a check that gets deleted. Promote to blocking once the
-      # intentional ones are recorded in .shellcheckrc.
-      - name: ShellCheck (advisory)
-        continue-on-error: true
+      - name: ShellCheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
           shellcheck -s sh -e SC1091 \

@@ -1,0 +1,4 @@
+# OpenWrt compatibility: pgrep is not guaranteed to be installed.
+# The client intentionally expands this string into multiple cfst options.
+# procd consumes START and USE_PROCD from init scripts outside ShellCheck's view.
+disable=SC2009,SC2034,SC2086
